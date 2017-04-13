@@ -1,25 +1,21 @@
 package mapreduce
 
-//
-// Please do not modify this file.
-//
-
 import (
 	"fmt"
 	"net"
 	"sync"
 )
 
-// Master holds all the state that the master needs to keep track of.
+// Master holds all the state that the master needs to keep track of. Of
+// particular importance is registerChannel, the channel that notifies the
+// master of workers that have gone idle and are in need of new work.
 type Master struct {
 	sync.Mutex
 
-	address     string
-	doneChannel chan bool
-
-	// protected by the mutex
-	newCond *sync.Cond // signals when Register() adds to workers[]
-	workers []string   // each worker's UNIX-domain socket name -- its RPC address
+	address         string
+	registerChannel chan string
+	doneChannel     chan bool
+	workers         []string // protected by the mutex
 
 	// Per-task information
 	jobName string   // Name of currently executing job
@@ -38,10 +34,9 @@ func (mr *Master) Register(args *RegisterArgs, _ *struct{}) error {
 	defer mr.Unlock()
 	debug("Register: worker %s\n", args.Worker)
 	mr.workers = append(mr.workers, args.Worker)
-
-	// tell forwardRegistrations() that there's a new workers[] entry.
-	mr.newCond.Broadcast()
-
+	go func() {
+		mr.registerChannel <- args.Worker
+	}()
 	return nil
 }
 
@@ -50,13 +45,13 @@ func newMaster(master string) (mr *Master) {
 	mr = new(Master)
 	mr.address = master
 	mr.shutdown = make(chan struct{})
-	mr.newCond = sync.NewCond(mr)
+	mr.registerChannel = make(chan string)
 	mr.doneChannel = make(chan bool)
 	return
 }
 
 // Sequential runs map and reduce tasks sequentially, waiting for each task to
-// complete before running the next.
+// complete before scheduling the next.
 func Sequential(jobName string, files []string, nreduce int,
 	mapF func(string, string) []KeyValue,
 	reduceF func(string, []string) string,
@@ -70,7 +65,7 @@ func Sequential(jobName string, files []string, nreduce int,
 			}
 		case reducePhase:
 			for i := 0; i < mr.nReduce; i++ {
-				doReduce(mr.jobName, i, mergeName(mr.jobName, i), len(mr.files), reduceF)
+				doReduce(mr.jobName, i, len(mr.files), reduceF)
 			}
 		}
 	}, func() {
@@ -79,42 +74,15 @@ func Sequential(jobName string, files []string, nreduce int,
 	return
 }
 
-// helper function that sends information about all existing
-// and newly registered workers to channel ch. schedule()
-// reads ch to learn about workers.
-func (mr *Master) forwardRegistrations(ch chan string) {
-	i := 0
-	for {
-		mr.Lock()
-		if len(mr.workers) > i {
-			// there's a worker that we haven't told schedule() about.
-			w := mr.workers[i]
-			go func() { ch <- w }() // send without holding the lock.
-			i = i + 1
-		} else {
-			// wait for Register() to add an entry to workers[]
-			// in response to an RPC from a new worker.
-			mr.newCond.Wait()
-		}
-		mr.Unlock()
-	}
-}
-
 // Distributed schedules map and reduce tasks on workers that register with the
 // master over RPC.
 func Distributed(jobName string, files []string, nreduce int, master string) (mr *Master) {
 	mr = newMaster(master)
 	mr.startRPCServer()
-	go mr.run(jobName, files, nreduce,
-		func(phase jobPhase) {
-			ch := make(chan string)
-			go mr.forwardRegistrations(ch)
-			schedule(mr.jobName, mr.files, mr.nReduce, phase, ch)
-		},
-		func() {
-			mr.stats = mr.killWorkers()
-			mr.stopRPCServer()
-		})
+	go mr.run(jobName, files, nreduce, mr.schedule, func() {
+		mr.stats = mr.killWorkers()
+		mr.stopRPCServer()
+	})
 	return
 }
 

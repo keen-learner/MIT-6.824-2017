@@ -6,9 +6,9 @@ import (
 )
 
 // Debugging enabled?
-const debugEnabled = false
+const debugEnabled = false 
 
-// debug() will only print if debugEnabled is true
+// DPrintf will only print if the debugEnabled const has been set to true
 func debug(format string, a ...interface{}) (n int, err error) {
 	if debugEnabled {
 		n, err = fmt.Printf(format, a...)
