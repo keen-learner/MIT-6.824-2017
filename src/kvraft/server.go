@@ -6,6 +6,7 @@ import (
 	"log"
 	"raft"
 	"sync"
+	"time"
 )
 
 const Debug = 0
@@ -17,11 +18,23 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+const (
+	OP_PUT         = "Put"
+	OP_APPEND      = "Append"
+	OP_GET         = "Get"
+	CLIENT_TIMEOUT = 1000 * time.Millisecond
+)
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+
+	Kind      string
+	Key       string
+	Value     string
+	SessionID int64
+	ReqID     int
 }
 
 type RaftKV struct {
@@ -33,15 +46,87 @@ type RaftKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+
+	data    map[string]string
+	results map[int]chan Op
+	history map[int64]int
 }
 
+func (kv *RaftKV) CheckDuplicate(entry Op) bool {
+	id, ok := kv.history[entry.SessionID]
+	if ok {
+		return id >= entry.ReqID
+	}
+	return false
+}
+
+func (kv *RaftKV) AppendLogEntry(entry Op) bool {
+	index, _, isLeader := kv.rf.Start(entry)
+
+	if !isLeader {
+		return false
+	}
+
+	kv.mu.Lock()
+	ch, ok := kv.results[index]
+	if !ok {
+		ch = make(chan Op, 1)
+		kv.results[index] = ch
+	}
+	kv.mu.Unlock()
+
+	select {
+	case op := <-ch:
+		return op == entry
+	case <-time.After(CLIENT_TIMEOUT):
+		return false
+	}
+}
+
+func (kv *RaftKV) Apply(op Op) {
+	switch op.Kind {
+	case OP_PUT:
+		kv.data[op.Key] = op.Value
+	case OP_APPEND:
+		kv.data[op.Key] += op.Value
+	}
+	kv.history[op.SessionID] = op.ReqID
+}
 
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	entry := Op{Kind: OP_GET, Key: args.Key, SessionID: args.SessionID, ReqID: args.ReqID}
+
+	ok := kv.AppendLogEntry(entry)
+	if !ok {
+		reply.WrongLeader = true
+		return
+	}
+
+	reply.Err = OK
+	reply.WrongLeader = false
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	reply.Value = kv.data[args.Key]
+	kv.history[args.SessionID] = args.ReqID
+
 }
 
 func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	entry := Op{Kind: args.Op, Key: args.Key, Value: args.Value, SessionID: args.SessionID, ReqID: args.ReqID}
+
+	ok := kv.AppendLogEntry(entry)
+
+	if !ok {
+		reply.WrongLeader = true
+		return
+	}
+
+	reply.WrongLeader = false
+	reply.Err = OK
+
 }
 
 //
@@ -53,6 +138,42 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 func (kv *RaftKV) Kill() {
 	kv.rf.Kill()
 	// Your code here, if desired.
+}
+
+func (kv *RaftKV) Init() {
+	kv.data = make(map[string]string)
+	kv.results = make(map[int]chan Op)
+	kv.history = make(map[int64]int)
+	kv.applyCh = make(chan raft.ApplyMsg, 100)
+}
+
+func (kv *RaftKV) Loop() {
+	for {
+		msg := <-kv.applyCh
+		op := msg.Command.(Op)
+
+		kv.mu.Lock()
+
+		if !kv.CheckDuplicate(op) {
+			kv.Apply(op)
+		}
+
+		ch, ok := kv.results[msg.Index]
+
+		if ok {
+			// clear the chan for the index
+			select {
+			case <-ch:
+			default:
+			}
+			ch <- op
+		} else {
+			// when the kv is a follower
+			kv.results[msg.Index] = make(chan Op,1)
+		}
+
+		kv.mu.Unlock()
+	}
 }
 
 //
@@ -79,9 +200,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 
-	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.Init()
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
+	go kv.Loop()
 	// You may need initialization code here.
 
 	return kv
