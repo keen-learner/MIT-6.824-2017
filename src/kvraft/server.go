@@ -7,6 +7,7 @@ import (
 	"raft"
 	"sync"
 	"time"
+	"bytes"
 )
 
 const Debug = 0
@@ -150,6 +151,26 @@ func (kv *RaftKV) Init() {
 func (kv *RaftKV) Loop() {
 	for {
 		msg := <-kv.applyCh
+
+		if msg.UseSnapshot {
+
+			var lastIncludedIndex int
+			var lastIncludedTerm int
+			snapshot := bytes.NewBuffer(msg.Snapshot)
+			decoder := gob.NewDecoder(snapshot)
+			decoder.Decode(&lastIncludedIndex)
+			decoder.Decode(&lastIncludedTerm)
+
+			kv.mu.Lock()
+			kv.data = make(map[string]string)
+			kv.history = make(map[int64]int)
+			decoder.Decode(&kv.data)
+			decoder.Decode(&kv.history)
+			kv.mu.Unlock()
+
+			continue
+		}
+
 		op := msg.Command.(Op)
 
 		kv.mu.Lock()
@@ -172,9 +193,19 @@ func (kv *RaftKV) Loop() {
 			kv.results[msg.Index] = make(chan Op,1)
 		}
 
+		if kv.maxraftstate != -1 && kv.maxraftstate < kv.rf.GetPersistSize() {
+			buf := new(bytes.Buffer)
+			encoder := gob.NewEncoder(buf)
+			encoder.Encode(kv.data)
+			encoder.Encode(kv.history)
+
+			go kv.rf.TakeSnapshot(buf.Bytes(),msg.Index)
+		}
+
 		kv.mu.Unlock()
 	}
 }
+
 
 //
 // servers[] contains the ports of the set of
