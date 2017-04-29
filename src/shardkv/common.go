@@ -19,6 +19,8 @@ const (
 	OP_PUT         = "PUT"
 	OP_APPEND      = "APPEND"
 	OP_RECONFIGURE = "RECONFIGURE"
+	OP_TRANSFER    = "TRANSFER"
+	OP_NOTIFY      = "NOTIFY"
 	CLIENT_TIMEOUT = 1000 * time.Millisecond
 )
 
@@ -73,6 +75,7 @@ type TransferArgs struct {
 }
 
 type TransferReply struct {
+	ConfigNum   int
 	Shards      [shardmaster.NShards]map[string]string
 	Ack         map[int64]int
 	WrongLeader bool
@@ -86,5 +89,14 @@ type ReconfigureArgs struct {
 }
 
 type ReconfigureReply struct {
+	Err Err
+}
+
+type NotifyArgs struct {
+	ConfigNum int
+	Shards    []int
+}
+
+type NotifyReply struct {
 	Err Err
 }

@@ -162,6 +162,9 @@ func (kv *ShardKV) ApplyOp(op *Op) interface{} {
 		return kv.ApplyPutAppend(op.Args.(PutAppendArgs))
 	case ReconfigureArgs:
 		return kv.ApplyReconfigure(op.Args.(ReconfigureArgs))
+	case TransferReply:
+		kv.ApplyTransferReply(op.Args.(TransferReply))
+		return nil
 	}
 	return nil
 }
@@ -224,6 +227,7 @@ func (kv *ShardKV) TransferShard(args *TransferArgs, reply *TransferReply) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
+	reply.ConfigNum = args.ConfigNum
 	// may should be removed
 	if _, isLeader := kv.rf.GetState(); !isLeader {
 		reply.Err = ErrWrongLeader
@@ -288,6 +292,7 @@ func (kv *ShardKV) BroadcastTransferShard(cfg *shardmaster.Config, transferShard
 			args.Shards = shards
 
 			if kv.SendTransferShard(gid, &args, &reply) {
+				kv.rf.Start(Op{Kind:OP_TRANSFER,Args:reply})
 				lock.Lock()
 
 				for index, data := range reply.Shards {
@@ -310,6 +315,16 @@ func (kv *ShardKV) BroadcastTransferShard(cfg *shardmaster.Config, transferShard
 	wait.Wait()
 	return res
 }
+
+//func (kv *ShardKV) TransferNotify(args *NotifyArgs, reply *NotifyReply) {
+//
+//}
+//
+//func (kv *ShardKV) SendTransferNotify(gid int,args *NotifyArgs, reply *NotifyReply) bool {
+//
+//}
+
+
 
 func (kv *ShardKV) PrepareReconfigure(cfg *shardmaster.Config) (ReconfigureArgs, bool) {
 	var res ReconfigureArgs
@@ -366,6 +381,29 @@ func (kv *ShardKV) ApplyReconfigure(args ReconfigureArgs) ReconfigureReply {
 	}
 	return reply
 }
+
+func (kv *ShardKV) ApplyTransferReply(args TransferReply) {
+	if args.ConfigNum == kv.cfg.Num+1 {
+		// already reached consensus, merge db and ack
+		for shardIndex, data := range args.Shards {
+			for k, v := range data {
+				kv.data[shardIndex][k] = v
+			}
+			kv.cfg.Shards[shardIndex] = kv.gid
+		}
+		for clientId := range args.Ack {
+			if _, exist := kv.ack[clientId]; !exist || kv.ack[clientId] < args.Ack[clientId] {
+				kv.ack[clientId] = args.Ack[clientId]
+			}
+		}
+
+		DPrintln("Server", kv.gid, kv.me, "Apply transfer shard:", args)
+	}
+}
+
+//func (kv *ShardKV) ApplyTransferNotify(args NotifyArgs) {
+//
+//}
 
 func (kv *ShardKV) ReadSnapshot(snapshot []byte) {
 	kv.mu.Lock()
