@@ -12,7 +12,10 @@ import "labrpc"
 import "crypto/rand"
 import "math/big"
 import "shardmaster"
-import "time"
+import (
+	"time"
+	"sync"
+)
 
 //
 // which shard is a key in?
@@ -40,6 +43,9 @@ type Clerk struct {
 	config   shardmaster.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
+	mu       sync.Mutex
+	clientId int64
+	reqId    int
 }
 
 //
@@ -56,6 +62,9 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck.sm = shardmaster.MakeClerk(masters)
 	ck.make_end = make_end
 	// You'll have to add code here.
+
+	ck.clientId = nrand()
+	ck.reqId = 0
 	return ck
 }
 
@@ -66,8 +75,12 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 // You will have to modify this function.
 //
 func (ck *Clerk) Get(key string) string {
-	args := GetArgs{}
-	args.Key = key
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+
+	args := GetArgs{Key:key,ClientId:ck.clientId}
+	ck.reqId++
+	args.ReqId = ck.reqId
 
 	for {
 		shard := key2shard(key)
@@ -99,11 +112,11 @@ func (ck *Clerk) Get(key string) string {
 // You will have to modify this function.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	args := PutAppendArgs{}
-	args.Key = key
-	args.Value = value
-	args.Op = op
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
 
+	ck.reqId++
+	args := PutAppendArgs{Key:key,Value:value,Op:op,ClientId:ck.clientId,ReqId:ck.reqId}
 
 	for {
 		shard := key2shard(key)
@@ -128,8 +141,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 }
 
 func (ck *Clerk) Put(key string, value string) {
-	ck.PutAppend(key, value, "Put")
+	ck.PutAppend(key, value, OP_PUT)
 }
 func (ck *Clerk) Append(key string, value string) {
-	ck.PutAppend(key, value, "Append")
+	ck.PutAppend(key, value, OP_APPEND)
 }

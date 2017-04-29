@@ -266,6 +266,7 @@ func (sm *ShardMaster) ApplyJoin(args JoinArgs) {
 	}
 
 	if needRebalance {
+		DPrintln("need rebalance!")
 		sm.Rebalance(cfg, OP_JOIN, gids)
 	}
 }
@@ -358,6 +359,16 @@ func (sm *ShardMaster) Rebalance(cfg *Config, opType string, gids []int) {
 				}
 				cfg.Shards[counts[maxGid][0]] = gid
 				counts[maxGid] = counts[maxGid][1:]
+			}
+		}
+
+		if cfg.Num == 1 {
+			for i := 0; i < NShards; i++ {
+				if cfg.Shards[i] == 0 {
+					minGid := sm.GetMinGidByShards(counts)
+					cfg.Shards[i] = minGid
+					counts[minGid] = append(counts[minGid],i)
+				}
 			}
 		}
 	case OP_LEAVE:
