@@ -30,6 +30,7 @@ const (
 	ErrWrongLeader = "ErrWrongLeader"
 	ErrWrongGroup  = "ErrWrongGroup"
 	ErrNotReady    = "ErrNotReady"
+	ErrOutDate     = "ErrOutDate"
 	ErrWrongConfig = "ErrWrongCOnfig"
 )
 

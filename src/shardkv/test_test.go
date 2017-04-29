@@ -606,10 +606,18 @@ func TestChallenge1Delete(t *testing.T) {
 	}
 
 	total := 0
+
+	totalRaft := 0
+	totalSnap := 0
+
 	for gi := 0; gi < cfg.ngroups; gi++ {
 		for i := 0; i < cfg.n; i++ {
 			raft := cfg.groups[gi].saved[i].RaftStateSize()
 			snap := len(cfg.groups[gi].saved[i].ReadSnapshot())
+
+			totalRaft += raft
+			totalSnap+= snap
+
 			total += raft + snap
 		}
 	}
@@ -620,6 +628,7 @@ func TestChallenge1Delete(t *testing.T) {
 	// plus slop.
 	expected := 3 * (((n - 3) * 1000) + 2*3*1000 + 6000)
 	if total > expected {
+		DPrintln("raft size : ",totalRaft," ; snap size : ",totalSnap)
 		t.Fatalf("snapshot + persisted Raft state are too big: %v > %v\n", total, expected)
 	}
 

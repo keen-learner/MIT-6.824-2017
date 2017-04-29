@@ -165,6 +165,8 @@ func (kv *ShardKV) ApplyOp(op *Op) interface{} {
 	case TransferReply:
 		kv.ApplyTransferReply(op.Args.(TransferReply))
 		return nil
+	case NotifyArgs:
+		return kv.ApplyTransferNotify(op.Args.(NotifyArgs))
 	}
 	return nil
 }
@@ -316,15 +318,67 @@ func (kv *ShardKV) BroadcastTransferShard(cfg *shardmaster.Config, transferShard
 	return res
 }
 
-//func (kv *ShardKV) TransferNotify(args *NotifyArgs, reply *NotifyReply) {
-//
-//}
-//
-//func (kv *ShardKV) SendTransferNotify(gid int,args *NotifyArgs, reply *NotifyReply) bool {
-//
-//}
+func (kv *ShardKV) TransferNotify(args *NotifyArgs, reply *NotifyReply) {
 
+	if _,isLeader := kv.rf.GetState(); !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
 
+	if kv.cfg.Num > args.ConfigNum {
+		reply.Err = ErrOutDate
+		return
+	}
+
+	op := Op{Kind:OP_NOTIFY,Args:*args}
+	msg,ok := kv.AppendLogEntry(op)
+
+	if !ok {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	if _, ok := msg.Args.(NotifyArgs); !ok {
+		reply.Err = ErrWrongLeader
+	} else {
+		reply.Err = msg.Reply.(NotifyReply).Err
+	}
+}
+
+func (kv *ShardKV) SendTransferNotify(gid int,args *NotifyArgs, reply *NotifyReply) bool {
+	for _, server := range kv.cfg.Groups[gid] {
+		srv := kv.make_end(server)
+		ok := srv.Call("ShardKV.TransferNotify", args, reply)
+		if ok {
+			if reply.Err == OK {
+				return true
+			} else if reply.Err == ErrOutDate {
+				return false
+			}
+		}
+	}
+	return false
+}
+
+func (kv *ShardKV) BroadcastTransferNotify(cfg shardmaster.Config) {
+	var args NotifyArgs
+	args.Shards = make([]int,0)
+	args.ConfigNum = cfg.Num
+	for i:=1; i < shardmaster.NShards; i++ {
+		if cfg.Shards[i] == kv.gid {
+			args.Shards = append(args.Shards,i)
+		}
+	}
+
+	for gid,_ := range cfg.Groups {
+		if gid != kv.gid {
+			go func(gid int,args *NotifyArgs) {
+				var reply NotifyReply
+				kv.SendTransferNotify(gid,args,&reply)
+			}(gid,&args)
+		}
+	}
+}
 
 func (kv *ShardKV) PrepareReconfigure(cfg *shardmaster.Config) (ReconfigureArgs, bool) {
 	var res ReconfigureArgs
@@ -401,9 +455,13 @@ func (kv *ShardKV) ApplyTransferReply(args TransferReply) {
 	}
 }
 
-//func (kv *ShardKV) ApplyTransferNotify(args NotifyArgs) {
-//
-//}
+func (kv *ShardKV) ApplyTransferNotify(args NotifyArgs) NotifyReply {
+	for _,shard := range args.Shards {
+		kv.data[shard] = make(map[string]string)
+	}
+	DPrintln("Server", kv.gid, kv.me, "Apply transfer notify:", args)
+	return NotifyReply{Err:OK}
+}
 
 func (kv *ShardKV) ReadSnapshot(snapshot []byte) {
 	kv.mu.Lock()
@@ -474,6 +532,7 @@ func (kv *ShardKV) Loop() {
 
 			kv.SendResult(msg.Index, result)
 			kv.TakeSnapshot(msg.Index)
+
 		}
 	}
 }
@@ -491,6 +550,8 @@ func (kv *ShardKV) Poll() {
 				if !kv.SyncReconfigure(args) {
 					break
 				}
+
+				kv.BroadcastTransferNotify(kv.cfg)
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -538,6 +599,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	gob.Register(ReconfigureReply{})
 	gob.Register(TransferArgs{})
 	gob.Register(TransferReply{})
+	gob.Register(NotifyArgs{})
+	gob.Register(NotifyReply{})
 
 	kv := new(ShardKV)
 	kv.me = me
